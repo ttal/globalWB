@@ -6,6 +6,7 @@ import numpy as np
 video_feed = False
 global_rect = None
 global_transform_matrix = None
+camera_matrix, distortion_coeffs, new_camera_matrix = None, None, None
 projection_detect = False
 global_frame = None
 fine_tune_draw = False
@@ -13,7 +14,7 @@ fine_tune_calc = False
 
 
 class ShowCapture(wx.Panel):
-    def __init__(self, parent, capture, fps=4, control_frame=True):
+    def __init__(self, parent, capture, fps=4, control_frame=True, chessboard_img='chessboard.png', cb_corners=(9, 6)):
         wx.Panel.__init__(self, parent)
 
         self.parent = parent
@@ -25,8 +26,12 @@ class ShowCapture(wx.Panel):
         self.coords = []
         self.count = 0
 
-        self.circle_positions = [[50, 50], [self.width-50, 50],
-                                 [self.width-50, self.height-50], [50, self.height-50]]
+        if not control_frame:
+            self.chessboard_img = cv2.resize(cv2.imread(chessboard_img), (self.width, self.height))
+            self.cb_corners = cb_corners
+            self.obj_points = np.zeros((self.cb_corners[1] * self.cb_corners[0], 3), np.float32)
+            self.obj_points[:,:2] = np.mgrid[0:cb_corners[0], 0:cb_corners[1]].T.reshape(-1, 2)
+            self.criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 0.001)
 
         if self.control_frame:
             self.calibrate = wx.ToggleButton(self, 1, 'calibrate')
@@ -41,8 +46,7 @@ class ShowCapture(wx.Panel):
                 self.frame = cv2.cvtColor(self.frame, cv2.COLOR_BGR2RGB)
 
             else:
-                self.frame = np.zeros((self.width, self.height, 3), np.int8)
-                self.frame[:] = 255
+                self.frame = np.ones((self.width, self.height, 3), np.uint8) * 255
 
         self.bmp = wx.BitmapFromBuffer(self.width, self.height, self.frame)
 
@@ -81,18 +85,22 @@ class ShowCapture(wx.Panel):
                         self.detect_screen(draw_contours=False)
                         projection_detect = False
                     self.expand_image()
-                    self.remove_background()
+
+                    if not fine_tune_calc:
+                        self.remove_background()
 
                     if fine_tune_calc:
-                        self.find_offsets()
+                        self.find_chessboard_distortions()
+                        self.frame = np.ones((self.width, self.height, 3), np.uint8) * 255
 
                         fine_tune_calc = False
 
                     if fine_tune_draw:
-                        self.draw_circles()
+                        self.frame = self.chessboard_img.copy()
+                        #cv2.imwrite('cb_project.png', self.frame)
                         self.count += 1
 
-                        if self.count > 2:
+                        if self.count > 3:
                             fine_tune_draw = False
                             fine_tune_calc = True
                 else:
@@ -163,6 +171,9 @@ class ShowCapture(wx.Panel):
 
     def expand_image(self):
         global global_transform_matrix
+        global new_camera_matrix
+        global camera_matrix
+        global distortion_coeffs
 
         if global_transform_matrix is None:
             if global_rect is not None:
@@ -172,7 +183,10 @@ class ShowCapture(wx.Panel):
                                 [0, self.height]], dtype='float32')
                 global_transform_matrix = cv2.getPerspectiveTransform(global_rect, dst)
 
-        self.frame = cv2.warpPerspective(self.frame, global_transform_matrix, (self.width, self.height))
+        if new_camera_matrix is not None:
+            self.frame = cv2.undistort(self.frame, camera_matrix, distortion_coeffs, None, new_camera_matrix)
+
+        self.frame = cv2.warpPerspective(self.frame, global_transform_matrix, (self.width, self.height), flags=cv2.INTER_CUBIC)
 
     def remove_background(self, power_factor=1.0, stdev_factor=1.5, gauss_kernel=51):
         (B, G, R) = cv2.split(self.frame.astype('float32'))
@@ -201,35 +215,21 @@ class ShowCapture(wx.Panel):
 
         self.frame = cv2.merge((single_channel, single_channel, single_channel))
 
-    def find_offsets(self, max_offset=10.0):
-        global global_transform_matrix
+    def find_chessboard_distortions(self):
+        global new_camera_matrix
+        global camera_matrix
+        global distortion_coeffs
 
+        #cv2.imwrite('cb_read.png', self.frame)
         gray = cv2.cvtColor(self.frame, cv2.COLOR_BGR2GRAY)
-        gray = cv2.bilateralFilter(gray, 15, 51, 51)
-        edged = cv2.Canny(gray, 20, 100)
-        _, contours, _ = cv2.findContours(edged.copy(), cv2.RETR_CCOMP, cv2.CHAIN_APPROX_TC89_L1)
 
-        coords = []
-        for i in range(len(contours)):
-            moments = cv2.moments(contours[i])
-            if moments['m00'] != 0 and moments['m00'] != 0:
-                x_cen, y_cen = moments['m10']/moments['m00'], moments['m01']/moments['m00']
-                nearest_circle = self.closest_node((x_cen, y_cen), self.circle_positions)
-                x_offset = np.abs(self.circle_positions[nearest_circle][0] - x_cen)
-                y_offset = np.abs(self.circle_positions[nearest_circle][1] - y_cen)
-                if x_offset <= max_offset and y_offset <= max_offset:
-                    coords.append((x_cen, y_cen))
+        _, corners = cv2.findChessboardCorners(gray, self.cb_corners, flags=cv2.CALIB_CB_ADAPTIVE_THRESH)
+        corners_sub_pix = cv2.cornerSubPix(gray, corners, (11, 11), (-1, -1), self.criteria)
 
-        rect = self.order_points(np.array(coords))
-        transform_matrix = cv2.getPerspectiveTransform(rect, np.array(self.circle_positions, dtype='float32'))
-        global_transform_matrix = np.dot(transform_matrix, global_transform_matrix)
-
-    def closest_node(self, node, nodes):
-        nodes = np.asarray(nodes)
-        deltas = nodes - node
-        dist_2 = np.einsum('ij,ij->i', deltas, deltas)
-
-        return np.argmin(dist_2)
+        _, camera_matrix, distortion_coeffs, _, _ = cv2.calibrateCamera([self.obj_points], [corners_sub_pix],
+                                                                        gray.shape[::-1], None, None)
+        new_camera_matrix, roi = cv2.getOptimalNewCameraMatrix(camera_matrix, distortion_coeffs,
+                                                               (self.width, self.height), 1, (self.width, self.height))
 
 
 class MainLoop:
