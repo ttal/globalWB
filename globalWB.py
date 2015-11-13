@@ -1,20 +1,17 @@
 import wx
 import cv2
-import copy
 import numpy as np
+import file_transfers
 
-video_feed = False
-global_rect = None
-global_transform_matrix = None
+video_feed, projection_detect, fine_tune_draw, fine_tune_calc, use_merged = False, False, False, False, False
+global_rect, global_frame, global_transform_matrix = None, None, None
 camera_matrix, distortion_coeffs, new_camera_matrix = None, None, None
-projection_detect = False
-global_frame = None
-fine_tune_draw = False
-fine_tune_calc = False
 
 
 class ShowCapture(wx.Panel):
-    def __init__(self, parent, capture, fps=4, control_frame=True, chessboard_img='chessboard.png', cb_corners=(9, 6)):
+    def __init__(self, parent, capture, fps=10, control_frame=True,
+                 chessboard_img='chessboard.png', cb_corners=(9, 6),
+                 screen_capture_file_name='gwb_screen_capture.png', merged_file_name='merged.png'):
         wx.Panel.__init__(self, parent)
 
         self.parent = parent
@@ -25,6 +22,10 @@ class ShowCapture(wx.Panel):
         self.parent.SetSize((self.width, self.height))
         self.coords = []
         self.count = 0
+
+        self.screen_capture_file_name = screen_capture_file_name
+        self.merged_file_name = merged_file_name
+        self.sft = file_transfers.FileTransfers(self.screen_capture_file_name, self.merged_file_name)
 
         if not control_frame:
             self.chessboard_img = cv2.resize(cv2.imread(chessboard_img), (self.width, self.height))
@@ -65,10 +66,7 @@ class ShowCapture(wx.Panel):
         dc.DrawBitmap(self.bmp, 0, 0)
 
     def NextFrame(self, event):
-        global projection_detect
-        global global_frame
-        global fine_tune_draw
-        global fine_tune_calc
+        global projection_detect, global_frame, fine_tune_draw, fine_tune_calc, use_merged
 
         ret, self.frame = self.capture.read()
         if ret:
@@ -81,6 +79,10 @@ class ShowCapture(wx.Panel):
 
             else:
                 if video_feed:
+                    if use_merged:
+                        self.sft.get_file()
+                        self.frame = cv2.imread(self.merged_file_name)
+
                     if projection_detect:
                         self.detect_screen(draw_contours=False)
                         projection_detect = False
@@ -103,19 +105,23 @@ class ShowCapture(wx.Panel):
                         if self.count > 3:
                             fine_tune_draw = False
                             fine_tune_calc = True
+
+                    if not fine_tune_calc and not fine_tune_draw:
+                        register_openers()
+                        self.sft.put_file()
+
                 else:
                     self.frame = np.ones((self.width, self.height, 3), np.uint8) * 255
                     projection_detect = True
 
                 global_frame = self.frame
+                cv2.imwrite(self.screen_capture_file_name, self.frame)
 
             self.bmp.CopyFromBuffer(self.frame)
             self.Refresh()
 
     def ToggleCalibrate(self, event):
-        global video_feed
-        global fine_tune_draw
-        global global_transform_matrix
+        global video_feed, fine_tune_draw, global_transform_matrix
 
         if self.calibrate.GetValue():
             video_feed = False
@@ -170,10 +176,7 @@ class ShowCapture(wx.Panel):
         return rect
 
     def expand_image(self):
-        global global_transform_matrix
-        global new_camera_matrix
-        global camera_matrix
-        global distortion_coeffs
+        global global_transform_matrix, new_camera_matrix, camera_matrix, distortion_coeffs
 
         if global_transform_matrix is None:
             if global_rect is not None:
@@ -216,9 +219,7 @@ class ShowCapture(wx.Panel):
         self.frame = cv2.merge((single_channel, single_channel, single_channel))
 
     def find_chessboard_distortions(self):
-        global new_camera_matrix
-        global camera_matrix
-        global distortion_coeffs
+        global new_camera_matrix, camera_matrix, distortion_coeffs
 
         #cv2.imwrite('cb_read.png', self.frame)
         gray = cv2.cvtColor(self.frame, cv2.COLOR_BGR2GRAY)
