@@ -6,10 +6,11 @@ import file_transfers
 video_feed, projection_detect, fine_tune_draw, fine_tune_calc, use_merged = False, False, False, False, False
 global_rect, global_frame, global_transform_matrix = None, None, None
 camera_matrix, distortion_coeffs, new_camera_matrix = None, None, None
+post_image = False
 
 
 class ShowCapture(wx.Panel):
-    def __init__(self, parent, capture, fps=10, control_frame=True,
+    def __init__(self, parent, capture, fps=4, control_frame=True,
                  chessboard_img='chessboard.png', cb_corners=(9, 6),
                  screen_capture_file_name='gwb_screen_capture.png', merged_file_name='merged.png'):
         wx.Panel.__init__(self, parent)
@@ -66,7 +67,7 @@ class ShowCapture(wx.Panel):
         dc.DrawBitmap(self.bmp, 0, 0)
 
     def NextFrame(self, event):
-        global projection_detect, global_frame, fine_tune_draw, fine_tune_calc, use_merged
+        global projection_detect, global_frame, fine_tune_draw, fine_tune_calc, use_merged, post_image
 
         ret, self.frame = self.capture.read()
         if ret:
@@ -79,9 +80,6 @@ class ShowCapture(wx.Panel):
 
             else:
                 if video_feed:
-                    if use_merged:
-                        self.sft.get_file()
-                        self.frame = cv2.imread(self.merged_file_name)
 
                     if projection_detect:
                         self.detect_screen(draw_contours=False)
@@ -105,10 +103,16 @@ class ShowCapture(wx.Panel):
                         if self.count > 3:
                             fine_tune_draw = False
                             fine_tune_calc = True
+                            post_image = True
+                            #self.frame = np.ones((self.width, self.height, 3), np.uint8) * 255
 
-                    if not fine_tune_calc and not fine_tune_draw:
-                        register_openers()
-                        self.sft.put_file()
+                    if post_image:
+                        cv2.imwrite(self.screen_capture_file_name, self.frame)
+                        self.sft.post_file()
+                        use_merged = True
+                    #if use_merged:
+                        self.sft.get_file()
+                        self.frame = cv2.imread(self.merged_file_name)
 
                 else:
                     self.frame = np.ones((self.width, self.height, 3), np.uint8) * 255
